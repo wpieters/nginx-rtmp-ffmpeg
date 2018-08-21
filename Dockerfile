@@ -1,28 +1,42 @@
-FROM ubuntu:trusty
+FROM ubuntu:xenial
 
-ENV DEBIAN_FRONTEND noninteractive
-ENV PATH $PATH:/usr/local/nginx/sbin
+# Building in the docker image increases the size because all the deps are installed
+# if these are done in separate RUN commands they get put into diff. layers and removing later has no effect apparently
+# as a result, all build/remove commands are pushed into one RUN command, the docker image goes from 808 MB to 300 by doing so
+RUN apt-get -y update; \
+    apt-get -y install software-properties-common dpkg-dev git; \
+    add-apt-repository -y ppa:nginx/stable; \
+    sed -i '/^#.* deb-src /s/^#//' /etc/apt/sources.list.d/nginx-ubuntu-stable-xenial.list; \
+    apt-get -y update; \
+    apt-get -y source nginx; \
+    cd $(find . -maxdepth 1 -type d -name "nginx*") && \
+    ls -ahl && \
+    git clone https://github.com/arut/nginx-rtmp-module.git && \
+    sed -i "s|common_configure_flags := \\\|common_configure_flags := \\\--add-module=$(cd  nginx-rtmp-module && pwd) \\\|" debian/rules && \
+    cat debian/rules && echo "^^" && \
+    apt-get -y build-dep nginx && \
+    dpkg-buildpackage -b && \
+    cd .. && ls -ahl && \
+    dpkg --install $(find . -maxdepth 1 -type f -name "nginx-common*") && \
+    dpkg --install $(find . -maxdepth 1 -type f -name "libnginx*") && \
+    dpkg --install $(find . -maxdepth 1 -type f -name "nginx-full*"); \
+    apt-get -y remove software-properties-common dpkg-dev git; \
+    apt-get -y install aptitude; \
+    aptitude -y markauto $(apt-cache showsrc nginx | sed -e '/Build-Depends/!d;s/Build-Depends: \|,\|([^)]*),*\|\[[^]]*\]//g'); \
+    apt-get -y autoremove; \
+    apt-get -y remove aptitude; \
+    apt-get -y autoremove; \
+    rm -rf ./*nginx*; \
+    add-apt-repository ppa:jonathonf/ffmpeg-3; \
+    apt-get -y update; \
+    apt-get -y install ffmpeg
 
-EXPOSE 1935
-EXPOSE 80
+# forward request and error logs to docker log collector
+RUN ln -sf /dev/stdout /var/log/nginx/access.log
+RUN ln -sf /dev/stderr /var/log/nginx/error.log
 
-RUN mkdir /src && mkdir /config && mkdir /logs && mkdir /data && mkdir /static
+EXPOSE 80 443 1935
 
-RUN apt-get update && apt-get upgrade -y && apt-get clean
-RUN apt-get install -y build-essential libpcre3-dev zlib1g-dev libssl-dev wget software-properties-common
+ADD nginx.conf /etc/nginx/nginx.conf
 
-RUN add-apt-repository ppa:mc3man/trusty-media && apt-get update
-RUN apt-get install -y ffmpeg
-
-RUN cd /src && wget http://nginx.org/download/nginx-1.10.2.tar.gz && tar zxf nginx-1.10.2.tar.gz && rm nginx-1.10.2.tar.gz
-
-# get nginx-rtmp module
-RUN cd /src && wget https://github.com/arut/nginx-rtmp-module/archive/v1.1.10.tar.gz && tar zxf v1.1.10.tar.gz && rm v1.1.10.tar.gz
-
-# compile nginx
-RUN cd /src/nginx-1.10.2 && ./configure --add-module=/src/nginx-rtmp-module-1.1.10 --conf-path=/config/nginx.conf --error-log-path=/logs/error.log --http-log-path=/logs/access.log
-RUN cd /src/nginx-1.10.2 && make && make install
-
-ADD nginx.conf /config/nginx.conf
-
-ENTRYPOINT "nginx"
+CMD ["nginx", "-g", "daemon off;"]
